@@ -140,10 +140,17 @@ with st.expander("🛠️ Fine Tuning (Fix inconsistencies)"):
     suhur_buffer = st.slider("Stop Eating X mins before Fajr", 0, 60, 10, help="Set to 0 if the printed time is already the stop time.")
     iftar_duration = st.slider("Iftar Event Duration (Minutes)", 15, 120, 60)
 
-# 4. Generate
+# ... previous code ...
+
+# 4. Year Selection (New Feature)
+current_year = datetime.date.today().year
+year = st.number_input("Year", min_value=2024, max_value=2030, value=current_year)
+
+# 5. Generate
 if st.button("Generate Calendar"):
-    with st.spinner(f"Fetching data for {city}..."):
-        data, timezone = get_prayer_times(city, country, method_id, 2026)
+    with st.spinner(f"Fetching data for {city} in {year}..."):
+        # Pass the 'year' variable instead of 2026
+        data, timezone = get_prayer_times(city, country, method_id, year)
         
         if data and timezone:
             ics_string = create_ics(
@@ -152,12 +159,12 @@ if st.button("Generate Calendar"):
                 fajr_correction, maghrib_correction
             )
             
-            st.success(f"✅ Success! Timezone detected: {timezone}")
+            st.success(f"✅ Success! Calendar for Ramadan {year} generated.")
             st.download_button(
-                label="📥 Download .ics File",
+                label=f"📥 Download {year} Calendar",
                 data=ics_string,
-                file_name=f"ramadan_{city}_2026.ics",
+                file_name=f"ramadan_{city}_{year}.ics",
                 mime="text/calendar"
             )
         else:
-            st.error("Could not find city. Try 'Tashkent' and 'Uzbekistan'.")
+            st.error("Could not find data. Please check your inputs.")
