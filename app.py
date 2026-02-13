@@ -1,15 +1,12 @@
 import streamlit as st
 import requests
 import datetime
-from io import BytesIO
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Ramadan Calendar Generator", page_icon="🌙")
+st.set_page_config(page_title="Iftar Calendar Maker", page_icon="🌙")
 
 def get_prayer_times(city, country, method_id, year):
-    """Fetches prayer times from Aladhan API for the whole year."""
-    # Method 13 is Diyanet (Turkey), suitable for your region.
-    # See https://aladhan.com/prayer-times-api#GetCalendarByCity for other methods.
+    """Fetches prayer times and timezone from Aladhan API."""
     url = "http://api.aladhan.com/v1/calendarByCity"
     params = {
         "city": city,
@@ -18,13 +15,21 @@ def get_prayer_times(city, country, method_id, year):
         "annual": "true",
         "year": year
     }
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
-        return response.json()['data']
-    return None
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        if 'data' in data and data['data']:
+            # Extract the timezone from the first available day
+            first_day = list(data['data'].values())[0][0]
+            timezone = first_day['meta']['timezone']
+            return data['data'], timezone
+    except Exception as e:
+        st.error(f"Error fetching data: {e}")
+    return None, None
 
-def create_ics(prayer_data, suhur_offset_minutes, iftar_duration_minutes):
-    """Generates the ICS file content string."""
+def create_ics(prayer_data, timezone, suhur_offset, iftar_duration, fajr_correction, maghrib_correction):
+    """Generates the ICS file with dynamic timezone and corrections."""
     ics_content = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -32,12 +37,13 @@ def create_ics(prayer_data, suhur_offset_minutes, iftar_duration_minutes):
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         "X-WR-CALNAME:Ramadan Schedule",
+        f"X-WR-TIMEZONE:{timezone}"  # Critical Fix: Dynamic Timezone
     ]
 
     # Process each month and day
     for month_str, days in prayer_data.items():
         for day in days:
-            date_str = day['date']['gregorian']['date']  # DD-MM-YYYY
+            date_str = day['date']['gregorian']['date']
             try:
                 date_obj = datetime.datetime.strptime(date_str, "%d-%m-%Y").date()
             except ValueError:
@@ -48,7 +54,7 @@ def create_ics(prayer_data, suhur_offset_minutes, iftar_duration_minutes):
             if hijri_month != 9:
                 continue
 
-            # Parse Times (Clean up format like "05:43 (TRT)")
+            # Parse Times
             fajr_raw = day['timings']['Fajr'].split()[0]
             maghrib_raw = day['timings']['Maghrib'].split()[0]
 
@@ -58,66 +64,95 @@ def create_ics(prayer_data, suhur_offset_minutes, iftar_duration_minutes):
             fajr_dt = datetime.datetime.combine(date_obj, fajr_time)
             maghrib_dt = datetime.datetime.combine(date_obj, maghrib_time)
 
+            # --- APPLY MANUAL CORRECTIONS ---
+            # Use this to match the website exactly (e.g. -2 mins)
+            fajr_dt += datetime.timedelta(minutes=fajr_correction)
+            maghrib_dt += datetime.timedelta(minutes=maghrib_correction)
+
             # --- SUHUR LOGIC ---
-            # Suhur ends 10 mins before Fajr (User Rule)
-            # Suhur starts earlier based on user offset
-            suhur_end = fajr_dt - datetime.timedelta(minutes=10)
-            suhur_start = suhur_end - datetime.timedelta(minutes=suhur_offset_minutes)
+            # Suhur End: User defined buffer before Fajr (e.g. 10 mins or 0 mins)
+            suhur_end = fajr_dt - datetime.timedelta(minutes=suhur_offset)
+            # Suhur Start: 1.5 hours (90 mins) before the end time
+            suhur_start = suhur_end - datetime.timedelta(minutes=90)
             
             # --- IFTAR LOGIC ---
-            # Starts at Maghrib, lasts for user-defined duration
             iftar_start = maghrib_dt
-            iftar_end = maghrib_dt + datetime.timedelta(minutes=iftar_duration_minutes)
+            iftar_end = maghrib_dt + datetime.timedelta(minutes=iftar_duration)
 
             # Generate VEVENT blocks
-            # Suhur Event
+            # Suhur
             ics_content.append("BEGIN:VEVENT")
-            ics_content.append(f"SUMMARY:Suhur (Stop Eating @ {suhur_end.strftime('%H:%M')})")
-            ics_content.append(f"DTSTART;TZID=Europe/Istanbul:{suhur_start.strftime('%Y%m%dT%H%M%S')}")
-            ics_content.append(f"DTEND;TZID=Europe/Istanbul:{suhur_end.strftime('%Y%m%dT%H%M%S')}")
-            ics_content.append("DESCRIPTION:Suhur time based on Fajr.")
+            ics_content.append(f"SUMMARY:Suhur (Stop: {suhur_end.strftime('%H:%M')})")
+            ics_content.append(f"DTSTART;TZID={timezone}:{suhur_start.strftime('%Y%m%dT%H%M%S')}")
+            ics_content.append(f"DTEND;TZID={timezone}:{suhur_end.strftime('%Y%m%dT%H%M%S')}")
+            ics_content.append(f"DESCRIPTION:Stop eating at {suhur_end.strftime('%H:%M')}")
             ics_content.append("END:VEVENT")
 
-            # Iftar Event
+            # Iftar
             ics_content.append("BEGIN:VEVENT")
-            ics_content.append(f"SUMMARY:Iftar")
-            ics_content.append(f"DTSTART;TZID=Europe/Istanbul:{iftar_start.strftime('%Y%m%dT%H%M%S')}")
-            ics_content.append(f"DTEND;TZID=Europe/Istanbul:{iftar_end.strftime('%Y%m%dT%H%M%S')}")
-            ics_content.append("DESCRIPTION:Time to break fast.")
+            ics_content.append(f"SUMMARY:Iftar ({iftar_start.strftime('%H:%M')})")
+            ics_content.append(f"DTSTART;TZID={timezone}:{iftar_start.strftime('%Y%m%dT%H%M%S')}")
+            ics_content.append(f"DTEND;TZID={timezone}:{iftar_end.strftime('%Y%m%dT%H%M%S')}")
+            ics_content.append("DESCRIPTION:Maghrib prayer time.")
             ics_content.append("END:VEVENT")
 
     ics_content.append("END:VCALENDAR")
     return "\n".join(ics_content)
 
 # --- APP UI ---
-st.title("🌙 Ramadan Calendar Generator")
-st.write("Generate a custom calendar for Google Calendar, Outlook, or Apple Calendar.")
+st.title("🌙 Iftar Calendar Maker")
+st.write("Generate a calendar that actually matches your local mosque.")
 
-# Inputs
+# 1. Location
 col1, col2 = st.columns(2)
 with col1:
-    city = st.text_input("City", "Istanbul")
+    city = st.text_input("City", "Tashkent")
 with col2:
-    country = st.text_input("Country", "Turkey")
+    country = st.text_input("Country", "Uzbekistan")
 
-st.info("Default settings are for Diyanet (Turkey) calculation methods.")
+# 2. Calculation Method (Crucial for Tashkent)
+st.write("### ⚙️ Calculation Settings")
+method_options = {
+    3: "Muslim World League (Standard for Uzbekistan)",
+    1: "University of Islamic Sciences, Karachi",
+    13: "Diyanet (Turkey)",
+    2: "ISNA (North America)",
+    4: "Umm Al-Qura (Makkah)"
+}
+method_id = st.selectbox(
+    "Calculation Method", 
+    options=list(method_options.keys()), 
+    format_func=lambda x: method_options[x],
+    index=0 # Default to MWL for Tashkent
+)
 
-# Advanced Settings Expander
-with st.expander("Customize Timings"):
-    # Default: 1.5 hours (90 mins) before Fajr - 10 mins buffer = 80 mins duration roughly
-    suhur_duration = st.slider("Suhur Duration (Minutes)", 30, 120, 90, help="How long before 'Stop Time' does Suhur start?")
-    iftar_duration = st.slider("Iftar Duration (Minutes)", 15, 120, 60, help="How long is the Iftar event?")
+# 3. Fine Tuning (The Fix for namozvaqti.uz)
+with st.expander("🛠️ Fine Tuning (Fix inconsistencies)"):
+    st.write("If the API times differ from `namozvaqti.uz`, adjust them here.")
+    
+    col_tune1, col_tune2 = st.columns(2)
+    with col_tune1:
+        fajr_correction = st.number_input("Fajr Offset (Minutes)", min_value=-60, max_value=60, value=0, help="e.g., -2 to make it earlier")
+    with col_tune2:
+        maghrib_correction = st.number_input("Maghrib Offset (Minutes)", min_value=-60, max_value=60, value=0)
 
+    st.write("---")
+    suhur_buffer = st.slider("Stop Eating X mins before Fajr", 0, 60, 10, help="Set to 0 if the printed time is already the stop time.")
+    iftar_duration = st.slider("Iftar Event Duration (Minutes)", 15, 120, 60)
+
+# 4. Generate
 if st.button("Generate Calendar"):
-    with st.spinner(f"Fetching prayer times for {city}..."):
-        # 13 is the Method ID for Diyanet (Turkey)
-        data = get_prayer_times(city, country, 13, 2026)
+    with st.spinner(f"Fetching data for {city}..."):
+        data, timezone = get_prayer_times(city, country, method_id, 2026)
         
-        if data:
-            ics_string = create_ics(data, suhur_duration, iftar_duration)
+        if data and timezone:
+            ics_string = create_ics(
+                data, timezone, 
+                suhur_buffer, iftar_duration, 
+                fajr_correction, maghrib_correction
+            )
             
-            # Create download button
-            st.success(f"Calendar ready for {city}, {country}!")
+            st.success(f"✅ Success! Timezone detected: {timezone}")
             st.download_button(
                 label="📥 Download .ics File",
                 data=ics_string,
@@ -125,4 +160,4 @@ if st.button("Generate Calendar"):
                 mime="text/calendar"
             )
         else:
-            st.error("Could not find that city. Please check the spelling.")
+            st.error("Could not find city. Try 'Tashkent' and 'Uzbekistan'.")
